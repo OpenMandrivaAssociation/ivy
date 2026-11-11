@@ -1,11 +1,12 @@
 Name:		ivy
 Version:	2.6.0
-Release:	1
+Release:	2
 Summary:	Dependency manager for Apache Ant
 Group:		Development/Java
 License:	Apache-2.0
 URL:		https://ant.apache.org/ivy/
 Source0:	https://downloads.apache.org/ant/ivy/%{version}/apache-ivy-%{version}-src.tar.gz
+Source1:	https://downloads.apache.org/ant/ivy/2.5.3/apache-ivy-2.5.3-src.tar.gz
 BuildArch:	noarch
 BuildRequires:	java-current-devel
 BuildRequires:	javapackages-filesystem
@@ -33,8 +34,8 @@ Requires:	apache-commons-lang3 >= 3.21.0
 
 %description
 Apache Ivy resolves and retrieves project dependencies. This package
-builds Ivy %{version} from source and installs one system jar. The
-command line tool and the Ant tasks use the jars already in cooker.
+builds Ivy %{version} from source. The 2.5.3 jar is installed beside
+it. The command line tool and the Ant tasks use the %{version} jar.
 
 The build leaves out features whose libraries are not packaged. The
 glob matcher needs Apache ORO. SFTP needs JSch. OpenPGP signatures
@@ -48,8 +49,9 @@ path traversal in PackagerResolver.
 
 %prep
 %setup -q -n apache-ivy-%{version}
-# Example trees ship a prebuilt jar. The build does not use it.
-find . -name '*.jar' -delete
+%setup -q -T -D -a 1 -n apache-ivy-%{version}
+# Example trees ship prebuilt jars. The build does not use them.
+find . \( -name '*.jar' -o -name '*.class' -o -name '*.so' -o -name '*.node' -o -name '*.wasm' \) -delete
 
 %build
 export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java}"
@@ -185,6 +187,132 @@ Path("build/ivy.pom").write_text("""<?xml version="1.0" encoding="UTF-8"?>
 """)
 PY
 
+# org.apache.ivy:ivy 2.5.3 stays beside %{version}. The command and
+# the Ant lib symlink keep the %{version} jar.
+(
+cd apache-ivy-2.5.3
+mkdir -p build/core build/ant build/opt build/classes
+python - << 'PY'
+from pathlib import Path
+src = Path("src/java")
+skip_prefix = (
+    "org/apache/ivy/plugins/repository/sftp/",
+    "org/apache/ivy/plugins/repository/ssh/",
+    "org/apache/ivy/plugins/signer/bouncycastle/",
+)
+skip_file = {
+    "org/apache/ivy/plugins/matcher/GlobPatternMatcher.java",
+    "org/apache/ivy/plugins/pack/Pack200Packing.java",
+    "org/apache/ivy/plugins/pack/Pack200Util.java",
+    "org/apache/ivy/plugins/resolver/AbstractSshBasedResolver.java",
+    "org/apache/ivy/plugins/resolver/SFTPResolver.java",
+    "org/apache/ivy/plugins/resolver/SshResolver.java",
+}
+opt_prefix = (
+    "org/apache/ivy/plugins/repository/vfs/",
+    "org/apache/ivy/plugins/repository/vsftp/",
+)
+opt_file = {
+    "org/apache/ivy/plugins/resolver/VfsResolver.java",
+    "org/apache/ivy/plugins/resolver/VsftpResolver.java",
+    "org/apache/ivy/util/url/HttpClientHandler.java",
+}
+core, ant, opt = [], [], []
+for path in sorted(src.rglob("*.java")):
+    rel = path.relative_to(src).as_posix()
+    if rel in skip_file or any(rel.startswith(prefix) for prefix in skip_prefix):
+        continue
+    if rel.startswith("org/apache/ivy/ant/") or rel.startswith("org/apache/ivy/plugins/resolver/packager/"):
+        ant.append(str(path))
+    elif rel in opt_file or any(rel.startswith(prefix) for prefix in opt_prefix):
+        opt.append(str(path))
+    else:
+        core.append(str(path))
+Path("build/core.list").write_text("\n".join(core) + "\n")
+Path("build/ant.list").write_text("\n".join(ant) + "\n")
+Path("build/opt.list").write_text("\n".join(opt) + "\n")
+if not core or not ant or not opt:
+    raise SystemExit("incomplete ivy 2.5.3 source lists")
+PY
+"$JAVAC" --release 8 -proc:none -d build/core -sourcepath src/java @build/core.list
+"$JAVAC" --release 8 -proc:none -d build/ant \
+	-classpath "build/core:%{_javadir}/ant.jar" \
+	-sourcepath src/java @build/ant.list
+"$JAVAC" --release 8 -proc:none -d build/opt \
+	-classpath "build/core:build/ant:%{_javadir}/ant.jar:%{_javadir}/commons-vfs2.jar:%{_javadir}/httpcomponents/httpclient.jar:%{_javadir}/httpcomponents/httpcore.jar:%{_javadir}/commons-codec.jar" \
+	-sourcepath src/java @build/opt.list
+cp -a build/core/. build/classes/
+cp -a build/ant/. build/classes/
+cp -a build/opt/. build/classes/
+find src/java -type f ! -name '*.java' -print | while IFS= read -r file; do
+	rel=${file#src/java/}
+	mkdir -p "build/classes/$(dirname "$rel")"
+	cp -p "$file" "build/classes/$rel"
+done
+settings=build/classes/org/apache/ivy/core/settings
+cp -p "$settings/ivysettings-local.xml" "$settings/ivyconf-local.xml"
+cp -p "$settings/ivysettings-default-chain.xml" "$settings/ivyconf-default-chain.xml"
+cp -p "$settings/ivysettings-main-chain.xml" "$settings/ivyconf-main-chain.xml"
+cp -p "$settings/ivysettings-public.xml" "$settings/ivyconf-public.xml"
+cp -p "$settings/ivysettings-shared.xml" "$settings/ivyconf-shared.xml"
+cp -p "$settings/ivysettings.xml" "$settings/ivyconf.xml"
+# 20241223115459 is the newest 2.5.3 src/java timestamp.
+echo "version=2.5.3" > build/classes/module.properties
+echo "date=20241223115459" >> build/classes/module.properties
+python - << 'PY'
+from pathlib import Path
+text = Path("META-INF/MANIFEST.MF").read_text()
+if not text.endswith("\n"):
+    text += "\n"
+text += (
+    "Implementation-Title: Apache Ivy\n"
+    "Implementation-Version: 2.5.3\n"
+    "Implementation-Vendor: Apache Software Foundation\n"
+)
+Path("build/MANIFEST.MF").write_text(text)
+Path("build/ivy.pom").write_text("""<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.apache.ivy</groupId>
+  <artifactId>ivy</artifactId>
+  <version>2.5.3</version>
+  <name>Apache Ivy</name>
+  <description>Dependency manager used with Apache Ant. Optional features that are not packaged are omitted.</description>
+  <url>https://ant.apache.org/ivy/</url>
+  <licenses>
+    <license>
+      <name>Apache-2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.ant</groupId>
+      <artifactId>ant</artifactId>
+      <version>1.10.18</version>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.httpcomponents</groupId>
+      <artifactId>httpclient</artifactId>
+      <version>4.5.14</version>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-vfs2</artifactId>
+      <version>2.10.0</version>
+      <optional>true</optional>
+    </dependency>
+  </dependencies>
+</project>
+""")
+PY
+"$JAVA_HOME/bin/jar" cfm build/ivy.jar build/MANIFEST.MF -C build/classes .
+test -s build/ivy.jar
+)
+
 %install
 mkdir -p %{buildroot}%{_bindir}
 mkdir -p %{buildroot}%{_sysconfdir}/ant.d
@@ -230,9 +358,21 @@ do
 done
 
 sysjar install --buildroot %{buildroot} \
+	--artifact "apache-ivy-2.5.3/build/ivy.pom:apache-ivy-2.5.3/build/ivy.jar" \
+	--file-name ivy-2.5.3 \
+	--filelist .mfiles253
+# %{version} owns ivy.sysjar. 2.5.3 keeps a second index.
+/bin/mv %{buildroot}/usr/share/sysjar/index/org.apache.ivy/ivy.sysjar \
+	%{buildroot}/usr/share/sysjar/index/org.apache.ivy/ivy-2.5.3.sysjar
+sed -i 's|/usr/share/sysjar/index/org.apache.ivy/ivy\.sysjar|/usr/share/sysjar/index/org.apache.ivy/ivy-2.5.3.sysjar|' .mfiles253
+
+sysjar install --buildroot %{buildroot} \
 	--artifact "build/ivy.pom:build/ivy.jar" \
 	--file-name ivy \
 	--filelist .mfiles
+while IFS= read -r line; do
+	grep -qxF -- "$line" .mfiles || printf '%s\n' "$line" >> .mfiles
+done < .mfiles253
 
 %check
 export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java}"
@@ -315,6 +455,35 @@ ln -s "$PWD/build/ivy.jar" check/home/lib/ivy.jar
 )
 grep -F -q 'ant ivy ok' check/ant.log
 test -s check/ant-out/lib.jar
+
+cat > Ivy253Check.java << 'EOF'
+public class Ivy253Check {
+    public static void main(String[] args) throws Exception {
+        String version = org.apache.ivy.Ivy.getIvyVersion();
+        if (!"2.5.3".equals(version)) {
+            throw new RuntimeException(version);
+        }
+        Object handler = org.apache.ivy.util.url.URLHandlerRegistry.getHttp();
+        String name = handler.getClass().getName();
+        if (!name.equals("org.apache.ivy.util.url.HttpClientHandler")) {
+            throw new RuntimeException(name);
+        }
+        org.apache.ivy.plugins.repository.vfs.VfsRepository repo =
+            new org.apache.ivy.plugins.repository.vfs.VfsRepository();
+        java.lang.reflect.Method method = repo.getClass().getDeclaredMethod("createVFSManager");
+        method.setAccessible(true);
+        method.invoke(repo);
+        System.out.println("ivy253_ok " + version);
+    }
+}
+EOF
+"$JAVA_HOME/bin/javac" --release 8 -proc:none -cp apache-ivy-2.5.3/build/ivy.jar Ivy253Check.java
+"$JAVA_HOME/bin/java" -cp "apache-ivy-2.5.3/build/ivy.jar:$deps:." Ivy253Check > check-253.log
+cat check-253.log
+grep -F -q 'ivy253_ok 2.5.3' check-253.log
+"$JAVA_HOME/bin/java" -cp "apache-ivy-2.5.3/build/ivy.jar:$deps" org.apache.ivy.Main -version > check-version-253.log
+cat check-version-253.log
+grep -F -q 'Apache Ivy 2.5.3' check-version-253.log
 
 %files -f .mfiles
 %license LICENSE NOTICE
